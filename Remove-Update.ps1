@@ -16,7 +16,7 @@ Remove-update -computername $computers -articleID KB1234567
 Removes the KB1234567 update from all computers in the $Computers variable
 
 .EXAMPLE
-Get-content .\computers.txt | Reomve-Update -articleID (get-content .\Badpatches.txt)
+Get-content .\computers.txt | Remove-Update -articleID (get-content .\Badpatches.txt)
 
 Removes all the updates stored in the BadPatches.txt file from all the computers listed in .\Computers.txt.
 
@@ -36,8 +36,12 @@ Version 1.0.0.3
 #Added help and made $articleID Mandatory
 #Removed Param block and switched to $args
 
+Updates by Adil Hindistan (2014-02-24)
+#Whatif support
+#Handle case-sensitivity issues around KB and localhostname
+
 #>
-[CmdletBinding(ConfirmImpact='Medium')]
+[CmdletBinding(ConfirmImpact='Medium',SupportsShouldProcess=$True)]
 param (
       # Enter a computername or multiple computernames
       [Parameter(
@@ -50,7 +54,7 @@ param (
 
       # Enter target ArticleIDs to be removed, Valid article IDs start with KB and are then followed by a sequence of numbers, ex: KB1456926
       [Parameter(Mandatory)]
-      [ValidateScript({$_.startswith('KB')})]
+      [ValidateScript({$_.startswith('KB',"CurrentCultureIgnoreCase")})] #allow kb or KB
       [validatelength(5,12)]
       [string[]]$ArticleID,
 
@@ -66,40 +70,66 @@ Begin
                 Scriptblock = {
                         Try {$VerbosePreference = $Using:VerbosePreference} Catch {Write-Verbose "Sending Errors to the Void"}
                         Try {$DebugPreference = $Using:DebugPreference} Catch {Write-Verbose "Sending Errors to the Void"}
+                        Try {$WhatifPreference = $Using:WhatifPreference} Catch {Write-Verbose "Sending Errors to the Void"}
+
                         Write-Verbose "Gathering patches on $ENV:COMPUTERNAME"
                         $patches = Get-HotFix
-                        Foreach ($p in $patches)
-                          {
-                            Write-Verbose "Testing patch against `$articleID"
-                            If ($args -contains $p.HotfixID)
-                              {
-                                Write-Debug "Patch to be Removed: $($p.HotfixID)"
-                                Start-Process wusa.exe -ArgumentList "/uninstall", "/KB:$($p.hotfixID.trimstart('KB'))", "/quiet", "/norestart" -Wait
-                              }
-                          }
+                        Write-Verbose "Number of patches for $env:ComputerName : $($patches.count)"
+
+                        ## List of patches to be removed is possibly shorter than all hotfixes
+                        Foreach ($arg in $args) {
+                           Write-Verbose "Checking if $Env:ComputerName has patch $arg"
+                           if ($arg -in $patches.HotfixID) 
+                           {                                
+
+                                Write-Verbose "$env:ComputerName has patch ${arg}, will attempt to remove!"
+                                
+                                if ($WhatifPreference) 
+                                {
+                                    Write-Verbose "Whatif on $env:ComputerName : Start-Process wusa.exe -ArgumentList `"/uninstall`", `"/KB:$($arg -replace 'KB')`", `"/quiet`", `"/norestart`" -Wait"
+                                } else {
+                                    Write-Verbose "Uninstalling $($arg -replace 'KB') on $env:ComputerName"
+                                    Start-Process wusa.exe -ArgumentList "/uninstall", "/KB:$($arg -replace 'KB')", "/quiet", "/norestart" -Wait
+                                }                                
+
+                           }
+                        
+                       } 
+
+
                     }
+
+
+
             }
         If ($credential) {$Params.Add('Credential',$credential)}
     }
+
 Process
     {
+        Write-Verbose "Adding $ComputerName to ArrayList"
         [System.Collections.ArrayList]$comps += $ComputerName 
     }
 End {
         if ($Comps -contains $ENV:COMPUTERNAME)
                 {
-                    $Comps.Remove("$ENV:COMPUTERNAME")
-                    $local = $True
-                }
-            if (($Comps | measure).Count -gt 0)
-                {
-                    $params.Add('ComputerName',$Comps)
+
+                    Write-Verbose "Working on local computer"
+                    Try   { $params.Remove('ComputerName') } 
+                    Catch { Write-Error "Could not remove localcomputer from list" }
                     Invoke-Command @params
+
+                    Write-Verbose "Removing local computer from computer list $env:computername"                                                            
+                    $Comps.remove(($Comps |where {$_ -eq "$env:computername"})) ## handles case-sensitivity around localhostname
+
                 }
-            if ($local)
-                {
-                    Try {$params.Remove('ComputerName')} Catch {Write-Verbose "Sending Errors to the Void"}
-                    Invoke-Command @params
-                }   
+
+        if ($Comps.Count -gt 0)
+            {
+                Write-Verbose  'Adding remaining computers to ArrayList'
+                $params.Add('ComputerName',$Comps)                                
+                Invoke-Command @params
+            }
+
     }
 }
